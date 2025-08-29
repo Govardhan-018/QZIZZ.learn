@@ -1,4 +1,3 @@
-
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -37,22 +36,30 @@ const app = express();
 app.set("trust proxy", 1);
 app.use(express.json());
 
-app.use(
-    cors({
-        origin: ["http://localhost:5173", "http://localhost:3000", "http://localhost:3939"],
-        credentials: true,
-    })
-);
+app.use(cors({
+  origin: [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://localhost:3939",
+    "https://qzizzlearn.vercel.app",
+    "https://qzizz-backend.onrender.com",
+    /\.vercel\.app$/,
+  ],
+  credentials: true,
+}));
+
+
 
 app.use(
     session({
         secret: process.env.SESSION_SECRET,
         resave: false,
         saveUninitialized: false,
+        proxy: true, // Added for production behind proxy (Render)
         cookie: {
             httpOnly: true,
-            secure: false,
-            sameSite: "lax",
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
             maxAge: 1000 * 60 * 60,
         },
     })
@@ -69,24 +76,21 @@ function issueJwt(payload) {
 
 // Hourly cleanup job - removes quizzes older than 1 hour
 cron.schedule('0 * * * *', async () => {
-    console.log('🕐 Running hourly quiz cleanup...');
+    console.log('Running hourly quiz cleanup...');
 
     try {
-        // Calculate timestamp for 1 hour ago
         const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
-        // Delete quizzes created more than 1 hour ago
         const { data, error } = await supabase
             .from("activeQuizes")
             .update({ closed: true })
-            .eq("id", parseInt(quizCode))
-            .eq("created_mail", req.user.mail)
+            .lt("crt_tm", oneHourAgo)
             .select();
+
         if (error) {
-            console.error('❌ Error deleting old quizzes:', error);
-        } else {
-            console.log(`✅ Deleted ${data?.length || 0} quizzes older than 1 hour`);
+            console.error("Error updating quizzes:", error);
         }
+
     } catch (e) {
         console.error('❌ Error in quiz cleanup job:', e);
     }
@@ -117,14 +121,18 @@ passport.use(
             clientID: process.env.GOOGLE_CLIENT_ID,
             clientSecret: process.env.GOOGLE_CLIENT_SECRET,
             callbackURL: process.env.GOOGLE_CALLBACK_URL,
+            proxy: true, // Added for correct callback handling behind proxy
         },
         async (accessToken, refreshToken, profile, done) => {
             try {
+                console.log("Google profile received:", profile); // Debug log
+
                 const email =
                     profile.emails && profile.emails.length ? profile.emails[0].value : null;
                 const name = profile.displayName || "";
 
                 if (!email) {
+                    console.error("No email in Google profile"); // Debug log
                     return done(new Error("No email returned by Google profile"));
                 }
 
@@ -179,7 +187,7 @@ passport.use(
                     name: dbUser.name,
                 });
             } catch (e) {
-                console.error("Error in Google OAuth strategy:", e);
+                console.error("Detailed Google OAuth error:", e); // Enhanced logging
                 return done(e);
             }
         }
@@ -201,7 +209,6 @@ app.get("/", (req, res) => {
 
 // Local signup
 app.post("/signup", async (req, res) => {
-    console.log("SignUp triggered")
     try {
         const { mail, pass } = req.body;
         const name = mail.split("@")[0];
@@ -323,32 +330,55 @@ app.get(
 );
 
 app.get(
-    "/auth/google/callback",
+  "/auth/google/callback",
+  (req, res, next) => {
+    console.log("=== OAUTH CALLBACK DEBUG ===");
+    console.log("Query params:", req.query);
+    console.log("Session before auth:", req.session);
+    console.log("Headers:", JSON.stringify(req.headers, null, 2));
+    console.log("Environment check:", {
+      NODE_ENV: process.env.NODE_ENV,
+      CALLBACK_URL: process.env.GOOGLE_CALLBACK_URL
+    });
+    next();
+  },
+  (req, res, next) => {
     passport.authenticate("google", {
-        failureRedirect: "/auth/failure",
-        session: true,
-    }),
-    (req, res) => {
-        try {
-            const user = req.user;
-            if (!user || !user.appUserId || !user.appUserMail) {
-                console.error("User identity not resolved:", user);
-                return res.redirect("http://localhost:5173/?error=auth_failed");
-            }
+      failureRedirect: "/auth/failure",
+      session: true,
+    })(req, res, (err) => {
+      if (err) {
+        console.error("Passport authenticate error:", err);
+        return res.redirect("https://qzizzlearn.vercel.app/?error=auth_error");
+      }
+      next();
+    });
+  },
+  (req, res) => {
+    try {
+      console.log("=== AUTH SUCCESS ===");
+      console.log("User:", req.user);
+      console.log("Session after auth:", req.session);
+      
+      const user = req.user;
+      if (!user || !user.appUserId || !user.appUserMail) {
+        console.error("User identity not resolved:", user);
+        return res.redirect("https://qzizzlearn.vercel.app/?error=auth_failed");
+      }
 
-            const token = issueJwt({ id: user.appUserId, mail: user.appUserMail });
-            // Fixed: Added missing & between URL parameters
-            res.redirect(`http://localhost:5173/?token=${token}&ok=true`);
-        } catch (e) {
-            console.error("Error in Google callback:", e);
-            res.redirect("http://localhost:5173/?error=callback_failed");
-        }
+      const token = issueJwt({ id: user.appUserId, mail: user.appUserMail });
+      res.redirect(`https://qzizzlearn.vercel.app/?token=${token}&ok=true`);
+    } catch (e) {
+      console.error("Error in Google callback:", e);
+      res.redirect("https://qzizzlearn.vercel.app/?error=callback_failed");
     }
+  }
 );
+
 
 // Auth failure route
 app.get("/auth/failure", (req, res) => {
-    res.redirect("http://localhost:5173/?error=google_auth_failed");
+    res.redirect("https://qzizz-backend.onrender.com/?error=google_auth_failed");
 });
 
 // Protected route
@@ -460,8 +490,6 @@ If inappropriate content, set validity to "invalid".`
                     error: "Database insert failed"
                 });
             }
-
-            console.log("Inserted quiz data:", data);
             return res.status(201).json({
                 ok: true,
                 quizCode: data.id
@@ -486,7 +514,6 @@ If inappropriate content, set validity to "invalid".`
 
 app.post("/close-quiz", authenticateToken, async (req, res) => {
     const { quizCode } = req.body;
-    console.log("Close quiz triggered for code:", quizCode);
 
     if (!quizCode) {
         return res.status(400).json({ ok: false, error: "quizCode required" });
@@ -509,8 +536,6 @@ app.post("/close-quiz", authenticateToken, async (req, res) => {
         if (!data || data.length === 0) {
             return res.status(404).json({ ok: false, error: "Quiz not found or unauthorized" });
         }
-
-        console.log("Quiz closed successfully:", data);
 
         // Now fetch the quiz data to update positions
         const { data: qzdata, error: qzerror } = await supabase // Fixed: qzdata, qzerror instead of destructuring incorrectly
@@ -537,8 +562,6 @@ app.post("/close-quiz", authenticateToken, async (req, res) => {
                         position: index + 1,
                     }));
 
-                console.log("Sorted leaderboard:", sorted);
-
                 // Update the quiz with sorted positions
                 const { data: updateData, error: updateError } = await supabase // Fixed: updata -> update, proper destructuring
                     .from("activeQuizes")
@@ -554,9 +577,6 @@ app.post("/close-quiz", authenticateToken, async (req, res) => {
                     });
                 }
 
-                console.log("Positions updated successfully:", updateData);
-            } else {
-                console.log("No completed participants to rank");
             }
         }
 
@@ -619,7 +639,6 @@ app.post("/join-quiz", authenticateToken, async (req, res) => {
                 return res.status(500).json({ ok: false, error: "Failed to join quiz" });
             }
 
-            console.log("User joined quiz successfully:", data);
         }
 
 
@@ -689,7 +708,6 @@ app.post("/submit-ans", authenticateToken, async (req, res) => {
             return res.status(404).json({ ok: false, error: "Quiz not found" });
         }
 
-        console.log("Quiz answers structure:", quiz.answers);
 
         // Calculate time taken (in seconds)
         let timeTaken = 0;
@@ -712,7 +730,6 @@ app.post("/submit-ans", authenticateToken, async (req, res) => {
             });
         }
 
-        console.log("Answer key:", answerKey);
 
         // Convert user answers object to iterable format
         const answersArray = Object.entries(answers).map(([questionId, answerData]) => ({
@@ -720,7 +737,6 @@ app.post("/submit-ans", authenticateToken, async (req, res) => {
             selected_option: answerData.option
         }));
 
-        console.log("User answers array:", answersArray);
 
         // Calculate correct answers
         let correctAnswers = 0;
@@ -800,7 +816,6 @@ app.post("/submit-ans", authenticateToken, async (req, res) => {
                 return res.status(500).json({ ok: false, error: "Failed to update completed users" });
             }
 
-            console.log("User marked as completed:", updateData);
         }
 
         return res.json({
@@ -883,7 +898,6 @@ app.post("/qzinfo", authenticateToken, async (req, res) => {
             return res.status(500).json({ error: "Failed to get data" });
         }
 
-        console.log(data);
         return res.status(200).json({ data });
     } catch (err) {
         console.error("Database error:", err);
@@ -893,18 +907,15 @@ app.post("/qzinfo", authenticateToken, async (req, res) => {
 
 app.post("/analysis", authenticateToken, async (req, res) => {
     const { quizCode, qid } = req.body;
-    console.log("Received data:", { quizCode, qid, userMail: req.user.mail });
-    
+
     try {
         // Fetch quiz data - Add detailed logging
-        console.log("Attempting to fetch quiz with ID:", quizCode);
         const { data: qzdata, error: quizError } = await supabase
             .from("activeQuizes")
             .select("*")
             .eq("id", quizCode)
             .single();
 
-        console.log("Quiz query result:", { qzdata, quizError });
 
         if (quizError) {
             console.error("Quiz fetch error:", quizError);
@@ -912,25 +923,21 @@ app.post("/analysis", authenticateToken, async (req, res) => {
         }
 
         if (!qzdata) {
-            console.log("No quiz found with ID:", quizCode);
+
             return res.status(404).json({ error: "Quiz not found", ok: false });
         }
 
-        console.log("Quiz found:", { id: qzdata.id, title: qzdata.title, closed: qzdata.closed });
 
         if (!qzdata.closed) {
             return res.status(401).json({ error: "Quiz is currently running, wait for completion", ok: false });
         }
 
         // Fetch result data - Add detailed logging
-        console.log("Attempting to fetch result with ID:", qid);
         const { data: resdata, error: resultError } = await supabase
             .from("quizResults")
             .select("*")
             .eq("id", qid)
             .single();
-
-        console.log("Result query result:", { resdata, resultError });
 
         if (resultError) {
             console.error("Result fetch error:", resultError);
@@ -938,26 +945,15 @@ app.post("/analysis", authenticateToken, async (req, res) => {
         }
 
         if (!resdata) {
-            console.log("No result found with ID:", qid);
             return res.status(404).json({ error: "Result not found", ok: false });
         }
 
-        console.log("Result found:", { 
-            id: resdata.id, 
-            quiz_id: resdata.quiz_id, 
-            user_mail: resdata.user_mail,
-            score: resdata.score 
-        });
 
         // Verify that the result belongs to the same quiz
         if (resdata.quiz_id !== parseInt(quizCode)) {
-            console.log("Quiz ID mismatch:", { 
-                resultQuizId: resdata.quiz_id, 
-                requestedQuizCode: quizCode 
-            });
-            return res.status(400).json({ 
-                error: "Result does not belong to the specified quiz", 
-                ok: false 
+            return res.status(400).json({
+                error: "Result does not belong to the specified quiz",
+                ok: false
             });
         }
 
@@ -966,12 +962,12 @@ app.post("/analysis", authenticateToken, async (req, res) => {
         let parsedAnswers = [];
 
         try {
-            parsedQuestions = typeof qzdata.questions === 'string' 
-                ? JSON.parse(qzdata.questions) 
+            parsedQuestions = typeof qzdata.questions === 'string'
+                ? JSON.parse(qzdata.questions)
                 : qzdata.questions;
-            
-            parsedAnswers = typeof qzdata.answers === 'string' 
-                ? JSON.parse(qzdata.answers) 
+
+            parsedAnswers = typeof qzdata.answers === 'string'
+                ? JSON.parse(qzdata.answers)
                 : qzdata.answers;
         } catch (parseError) {
             console.error("JSON parse error:", parseError);
@@ -986,12 +982,10 @@ app.post("/analysis", authenticateToken, async (req, res) => {
             created_time: qzdata.crt_tm
         };
 
-        console.log("Successfully prepared response data");
-        
-        return res.status(200).json({ 
-            quizInfo, 
-            resdata, 
-            ok: true 
+        return res.status(200).json({
+            quizInfo,
+            resdata,
+            ok: true
         });
 
     } catch (error) {
@@ -1011,8 +1005,6 @@ app.use((err, req, res, next) => {
 // Start server
 const port = Number(process.env.PORT) || 3939;
 app.listen(port, () => {
-    console.log(`Auth server running on http://localhost:${port}`);
-    console.log(`Google OAuth URL: http://localhost:${port}/auth/google`);
-    console.log('⏰ Hourly quiz cleanup job scheduled');
+    console.log(`Server is running`);
 });
 

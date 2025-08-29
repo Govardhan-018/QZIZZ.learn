@@ -156,3 +156,5 @@ Desktop.ini
 
 #
 backend/.env
+frount/.env
+.env
